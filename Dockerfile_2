@@ -1,0 +1,25 @@
+
+FROM golang:1.15 AS builder
+
+WORKDIR /go/src/github.com/openshift/ovn-kubernetes
+COPY . .
+
+# build the binaries
+RUN cd go-controller; CGO_ENABLED=0 make
+RUN cd go-controller; CGO_ENABLED=0 make windows
+
+
+
+FROM quay.io/openshift/okd-content@sha256:b4d6b9d9b50d0adbe1912a1064a737fbe6c22be50fbb7b8d849b0740422e7994
+
+COPY --from=builder /go/src/github.com/openshift/ovn-kubernetes/go-controller/_output/go/bin/ovnkube /usr/bin/
+COPY --from=builder /go/src/github.com/openshift/ovn-kubernetes/go-controller/_output/go/bin/ovn-kube-util /usr/bin/
+COPY --from=builder /go/src/github.com/openshift/ovn-kubernetes/go-controller/_output/go/bin/ovn-k8s-cni-overlay /usr/libexec/cni/
+COPY --from=builder /go/src/github.com/openshift/ovn-kubernetes/go-controller/_output/go/bin/windows/hybrid-overlay-node.exe /root/windows/
+COPY --from=builder /go/src/github.com/openshift/ovn-kubernetes/go-controller/_output/go/bin/ovndbchecker /usr/bin/
+COPY --from=builder /go/src/github.com/openshift/ovn-kubernetes/go-controller/_output/go/bin/ovnkube-trace /usr/bin/
+
+###
+#  docker build -t harbor.avm.de/openshift/ovn-kubernetes:egressip-bugfix-2 -f Dockerfile_2 .
+#  oc adm release new --from-release quay.io/openshift/okd:4.7.0-0.okd-2021-07-03-190901 --to-image harbor.avm.de/openshift/okd-egressip-bugfix:4.7.0-0.okd-2021-06-19-191547-avm-2 ovn-kubernetes=harbor.avm.de/openshift/ovn-kubernetes:egressip-bugfix-2
+#

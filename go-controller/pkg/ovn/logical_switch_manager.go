@@ -91,6 +91,7 @@ func newLogicalSwitchManager() *logicalSwitchManager {
 // AddNode adds/updates a node to the logical switch manager for subnet
 // and IPAM management.
 func (manager *logicalSwitchManager) AddNode(nodeName string, hostSubnets []*net.IPNet) error {
+	klog.Infof("AddNode %s with Subnet %v", nodeName, hostSubnets)
 	manager.Lock()
 	defer manager.Unlock()
 	if lsi, ok := manager.cache[nodeName]; ok && !reflect.DeepEqual(lsi.hostSubnets, hostSubnets) {
@@ -106,6 +107,7 @@ func (manager *logicalSwitchManager) AddNode(nodeName string, hostSubnets []*net
 		}
 		ipams = append(ipams, ipam)
 	}
+	klog.Infof("Cache Key: %s", nodeName)
 	manager.cache[nodeName] = logicalSwitchInfo{
 		hostSubnets:  hostSubnets,
 		ipams:        ipams,
@@ -143,6 +145,7 @@ func (manager *logicalSwitchManager) IsNonHostSubnetSwitch(nodeName string) bool
 func (manager *logicalSwitchManager) GetSwitchSubnets(nodeName string) []*net.IPNet {
 	manager.RLock()
 	defer manager.RUnlock()
+	klog.Infof("GetGetSwitchSubnets for %s", nodeName)
 	lsi, ok := manager.cache[nodeName]
 	// make a deep-copy of the underlying slice and return so that there is no
 	// resource contention
@@ -314,6 +317,7 @@ func initJoinLogicalSwitchIPManager() (*joinSwitchIPManager, error) {
 		},
 		lrpIPCache: make(map[string][]*net.IPNet),
 	}
+	klog.Info("initJoinLogicalSwitchIPManager")
 	var joinSubnets []*net.IPNet
 	joinSubnetsConfig := []string{}
 	if config.IPv4Mode {
@@ -362,6 +366,7 @@ func (jsIPManager *joinSwitchIPManager) delJoinLRPCacheIPs(nodeName string) {
 // reserveJoinLRPIPs tries to add the LRP IPs to the joinSwitchIPManager, then they will be stored in the cache;
 func (jsIPManager *joinSwitchIPManager) reserveJoinLRPIPs(nodeName string, gwLRPIPs []*net.IPNet) (err error) {
 	// reserve the given IP in the allocator
+	klog.Infof("reserveJoinLRPIPs with NodeName %s and gwLRPIPs %v", nodeName, util.JoinIPNetIPs(gwLRPIPs, " "))
 	if err = jsIPManager.lsm.AllocateIPs(types.OVNJoinSwitch, gwLRPIPs); err == nil {
 		defer func() {
 			if err != nil {
@@ -383,6 +388,7 @@ func (jsIPManager *joinSwitchIPManager) ensureJoinLRPIPs(nodeName string) (gwLRP
 	var ok bool
 	// first check the IP cache, return if an entry already exists
 	gwLRPIPs, ok = jsIPManager.getJoinLRPCacheIPs(nodeName)
+	klog.Infof("Node %s has gwLRPIPs %v", nodeName, util.JoinIPNetIPs(gwLRPIPs, " "))
 	if ok {
 		return gwLRPIPs, nil
 	}
@@ -398,6 +404,7 @@ func (jsIPManager *joinSwitchIPManager) ensureJoinLRPIPs(nodeName string) (gwLRP
 		return gwLRPIPs, nil
 	}
 	gwLRPIPs, err = jsIPManager.lsm.AllocateNextIPs(types.OVNJoinSwitch)
+	klog.Infof("Node %s has new gwLRPIPs %v", nodeName, util.JoinIPNetIPs(gwLRPIPs, " "))
 	if err != nil {
 		return nil, err
 	}
@@ -426,10 +433,15 @@ func (jsIPManager *joinSwitchIPManager) getJoinLRPAddresses(nodeName string) []*
 	gwLrpName := types.GWRouterToJoinSwitchPrefix + types.GWRouterPrefix + nodeName
 	joinSubnets := jsIPManager.lsm.GetSwitchSubnets(types.OVNJoinSwitch)
 	ifAddrs, err := util.GetLRPAddrs(gwLrpName)
+	klog.Infof("Checked Node: %s", nodeName)
+	klog.Infof("ifAddrs: %v", ifAddrs)
+	klog.Infof("joinSubnets: %v", joinSubnets)
+	klog.Infof("NodeJoinSubnets: %v", jsIPManager.lsm.GetSwitchSubnets(nodeName))
 	if err == nil {
 		for _, ifAddr := range ifAddrs {
 			for _, subnet := range joinSubnets {
 				if subnet.Contains(ifAddr.IP) {
+					klog.Infof("Found valid IP Adress")
 					gwLRPIPs = append(gwLRPIPs, &net.IPNet{IP: ifAddr.IP, Mask: subnet.Mask})
 					break
 				}
