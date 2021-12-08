@@ -25,6 +25,8 @@ const (
 	// defaultOpenFlowCookie identifies default open flow rules added to the host OVS bridge.
 	// The hex number 0xdeff105, aka defflos, is meant to sound like default flows.
 	defaultOpenFlowCookie = "0xdeff105"
+	// ovsLocalPort is the name of the OVS bridge local port
+	ovsLocalPort = "LOCAL"
 )
 
 // nodePortWatcher manages OpenfLow and iptables rules
@@ -89,71 +91,103 @@ func (npw *nodePortWatcher) updateServiceFlowCache(service *kapi.Service, add bo
 		// Established traffic is handled by default conntrack rules
 		// NodePort/Ingress access in the OVS bridge will only ever come from outside of the host
 		for _, ing := range service.Status.LoadBalancer.Ingress {
-			if ing.IP == "" {
-				continue
-			}
-			ingIP := net.ParseIP(ing.IP)
-			if ingIP == nil {
-				klog.Errorf("Failed to parse ingress IP: %s", ing.IP)
-				continue
-			}
-			cookie, err = svcToCookie(service.Namespace, service.Name, ingIP.String(), svcPort.Port)
+			err = npw.createLbAndExternalSvcFlows(service, &svcPort, add, protocol, actions, ing.IP, "Ingress")
 			if err != nil {
-				klog.Warningf("Unable to generate cookie for ingress svc: %s, %s, %s, %d, error: %v",
-					service.Namespace, service.Name, ingIP.String(), svcPort.Port, err)
-				cookie = "0"
-			}
-			flowProtocol := protocol
-			nwDst := "nw_dst"
-			nwSrc := "nw_src"
-			if utilnet.IsIPv6String(ing.IP) {
-				flowProtocol = protocol + "6"
-				nwDst = "ipv6_dst"
-				nwSrc = "ipv6_src"
-			}
-			key = strings.Join([]string{"Ingress", service.Namespace, service.Name, ingIP.String(), fmt.Sprintf("%d", svcPort.Port)}, "_")
-			if !add {
-				npw.ofm.deleteFlowsByKey(key)
-			} else {
-				npw.ofm.updateFlowCacheEntry(key, []string{
-					fmt.Sprintf("cookie=%s, priority=110, in_port=%s, %s, %s=%s, tp_dst=%d, "+
-						"actions=%s",
-						cookie, npw.ofportPhys, flowProtocol, nwDst, ing.IP, svcPort.Port, actions),
-					fmt.Sprintf("cookie=%s, priority=110, in_port=%s, %s, %s=%s, tp_src=%d, "+
-						"actions=output:%s",
-						cookie, npw.ofportPatch, flowProtocol, nwSrc, ing.IP, svcPort.Port, npw.ofportPhys)})
+				klog.Errorf(err.Error())
+
 			}
 		}
 
 		for _, externalIP := range service.Spec.ExternalIPs {
-			flowProtocol := protocol
-			nwDst := "nw_dst"
-			nwSrc := "nw_src"
-			if utilnet.IsIPv6String(externalIP) {
-				flowProtocol = protocol + "6"
-				nwDst = "ipv6_dst"
-				nwSrc = "ipv6_src"
-			}
-			cookie, err = svcToCookie(service.Namespace, service.Name, externalIP, svcPort.Port)
+			err = npw.createLbAndExternalSvcFlows(service, &svcPort, add, protocol, actions, externalIP, "External")
 			if err != nil {
-				klog.Warningf("Unable to generate cookie for external svc: %s, %s, %s, %d, error: %v",
-					service.Namespace, service.Name, externalIP, svcPort.Port, err)
-				cookie = "0"
+				klog.Errorf(err.Error())
 			}
-			key := strings.Join([]string{"External", service.Namespace, service.Name, externalIP, fmt.Sprintf("%d", svcPort.Port)}, "_")
-			if !add {
-				npw.ofm.deleteFlowsByKey(key)
-			} else {
-				npw.ofm.updateFlowCacheEntry(key, []string{
-					fmt.Sprintf("cookie=%s, priority=110, in_port=%s, %s, %s=%s, tp_dst=%d, "+
-						"actions=%s",
-						cookie, npw.ofportPhys, flowProtocol, nwDst, externalIP, svcPort.Port, actions),
-					fmt.Sprintf("cookie=%s, priority=110, in_port=%s, %s, %s=%s, tp_src=%d, "+
-						"actions=output:%s",
-						cookie, npw.ofportPatch, flowProtocol, nwSrc, externalIP, svcPort.Port, npw.ofportPhys)})
-			}
+
 		}
 	}
+}
+
+// flow generation for LB and ExternalIP flow is essentially the same, so avoid code duplication with
+// this method
+func (npw *nodePortWatcher) createLbAndExternalSvcFlows(service *kapi.Service, svcPort *kapi.ServicePort, add bool, protocol string, actions string, ipAddress string, ipType string) error {
+	if ipAddress == "" {
+		return fmt.Errorf("failed to parse %s IP. IP is empty.", ipType)
+	}
+	if net.ParseIP(ipAddress) == nil {
+		return fmt.Errorf("failed to parse %s IP: %s", ipType, ipAddress)
+	}
+	flowProtocol := protocol
+	nwDst := "nw_dst"
+	nwSrc := "nw_src"
+	if utilnet.IsIPv6String(ipAddress) {
+		flowProtocol = protocol + "6"
+		nwDst = "ipv6_dst"
+		nwSrc = "ipv6_src"
+	}
+	cookie, err := svcToCookie(service.Namespace, service.Name, ipAddress, svcPort.Port)
+	if err != nil {
+		klog.Warningf("Unable to generate cookie for %s svc: %s, %s, %s, %d, error: %v",
+			ipType, service.Namespace, service.Name, ipAddress, svcPort.Port, err)
+		cookie = "0"
+	}
+	key := strings.Join([]string{ipType, service.Namespace, service.Name, ipAddress, fmt.Sprintf("%d", svcPort.Port)}, "_")
+	// Delete if needed and skip to next protocol
+	if !add {
+		npw.ofm.deleteFlowsByKey(key)
+		return nil
+	}
+	npw.ofm.updateFlowCacheEntry(key, []string{
+		fmt.Sprintf("cookie=%s, priority=110, in_port=%s, %s, %s=%s, tp_dst=%d, "+
+			"actions=%s",
+			cookie, npw.ofportPhys, flowProtocol, nwDst, ipAddress, svcPort.Port, actions),
+		fmt.Sprintf("cookie=%s, priority=110, in_port=%s, %s, %s=%s, tp_src=%d, "+
+			"actions=output:%s",
+			cookie, npw.ofportPatch, flowProtocol, nwSrc, ipAddress, svcPort.Port, npw.ofportPhys),
+		npw.generateArpBypassFlow(protocol, ipAddress, cookie)})
+
+	return nil
+}
+
+// generate ARP/NS bypass flow which will send the ARP/NS request everywhere *but* to OVN
+// OpenFlow will not do hairpin switching, so we can safely add the origin port to the list of ports, too
+func (npw *nodePortWatcher) generateArpBypassFlow(protocol string, ipAddr string, cookie string) string {
+	addrResDst := "arp_tpa"
+	addrResProto := "arp, arp_op=1"
+	if utilnet.IsIPv6String(ipAddr) {
+		addrResDst = "nd_target"
+		addrResProto = "icmp6, icmp_type=135, icmp_code=0"
+	}
+
+	var arpFlow string
+	var arpPortsFiltered []string
+	arpPorts, err := util.GetOpenFlowPorts(npw.gwBridge, false)
+	if err != nil {
+		// in the odd case that getting all ports from the bridge should not work,
+		// simply output to LOCAL (this should work well in the vast majority of cases, anyway)
+		klog.Warningf("Unable to get port list from bridge. Using ovsLocalPort as output only: error: %v",
+			err)
+		arpFlow = fmt.Sprintf("cookie=%s, priority=110, in_port=%s, %s, %s=%s, "+
+			"actions=output:%s",
+			cookie, npw.ofportPhys, addrResProto, addrResDst, ipAddr, ovsLocalPort)
+	} else {
+		// cover the case where breth0 has more than 3 ports, e.g. if an admin adds a 4th port
+		// and the ExternalIP would be on that port
+		// Use all ports except for ofPortPhys and the ofportPatch
+		// Filtering ofPortPhys is for consistency / readability only, OpenFlow will not send
+		// out the in_port normally (see man 7 ovs-actions)
+		for _, port := range arpPorts {
+			if port == npw.ofportPatch || port == npw.ofportPhys {
+				continue
+			}
+			arpPortsFiltered = append(arpPortsFiltered, port)
+		}
+		arpFlow = fmt.Sprintf("cookie=%s, priority=110, in_port=%s, %s, %s=%s, "+
+			"actions=output:%s",
+			cookie, npw.ofportPhys, addrResProto, addrResDst, ipAddr, strings.Join(arpPortsFiltered, ","))
+	}
+
+	return arpFlow
 }
 
 // AddService handles configuring shared gateway bridge flows to steer External IP, Node Port, Ingress LB traffic into OVN

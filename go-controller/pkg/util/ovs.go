@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/pkg/errors"
 	"math"
 	"os"
 	"os/exec"
@@ -16,6 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+
+	"github.com/pkg/errors"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
@@ -725,6 +726,31 @@ func ReplaceOFFlows(bridgeName string, flows []string) (string, string, error) {
 	cmd.SetStdin(stdin)
 	stdout, stderr, err := runCmd(cmd, runner.ofctlPath, args...)
 	return strings.Trim(stdout.String(), "\" \n"), stderr.String(), err
+}
+
+// Get OpenFlow Port names or numbers for a given bridge
+func GetOpenFlowPorts(bridgeName string, namedPorts bool) ([]string, error) {
+	stdout, stderr, err := RunOVSOfctl("show", bridgeName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get list of ports on bridge %q:, stderr: %q, error: %v",
+			bridgeName, stderr, err)
+	}
+
+	index := 0
+	if namedPorts {
+		index = 1
+	}
+	var ports []string
+	re := regexp.MustCompile("[(|)]")
+	for _, line := range strings.Split(stdout, "\n") {
+		if strings.Contains(line, "addr:") {
+			port := strings.TrimSpace(
+				re.Split(line, -1)[index],
+			)
+			ports = append(ports, port)
+		}
+	}
+	return ports, nil
 }
 
 // GetOvnRunDir returns the OVN's rundir.
